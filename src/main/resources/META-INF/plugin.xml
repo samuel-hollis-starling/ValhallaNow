@@ -1,0 +1,46 @@
+<idea-plugin>
+    <id>me.samhollis.valhallanow</id>
+    <name>Valhalla Now</name>
+    <vendor email="support@samhollis.me" url="https://github.com/samhollis">Samuel Hollis</vendor>
+
+    <description><![CDATA[
+        <h1>Valhalla Now - Project Valhalla Nullable Types</h1>
+        <p>
+            Brings Project Valhalla's nullable type syntax to IntelliJ IDEA today!
+            This plugin provides visual transformation and typing assistance for nullable types
+            using JSpecify annotations.
+        </p>
+        <h2>Features</h2>
+        <ul>
+            <li><b>Visual Transformation:</b> Displays <code>@Nullable String</code> as <code>String?</code></li>
+            <li><b>Typing Assistance:</b> Type <code>?</code> after a type to automatically insert <code>@Nullable</code></li>
+            <li><b>Full Support:</b> Works with fields, parameters, return types, generics, and arrays</li>
+            <li><b>Smart Validation:</b> Prevents nullable primitives with helpful error messages</li>
+        </ul>
+        <h2>Examples</h2>
+        <ul>
+            <li>Fields: <code>String?</code> instead of <code>@Nullable String</code></li>
+            <li>Generics: <code>List&lt;String?&gt;</code> instead of <code>List&lt;@Nullable String&gt;</code></li>
+            <li>Arrays: <code>String[]?</code> for nullable arrays, <code>String?[]</code> for arrays of nullable elements</li>
+        </ul>
+        <p>
+            Leverages JSpecify annotations (org.jspecify.annotations.Nullable) for compatibility
+            with the emerging Project Valhalla nullable type system.
+        </p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+
+    <idea-version since-build="242"/>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Folding builder for visual transformation -->
+        <lang.foldingBuilder language="JAVA"
+                             implementationClass="me.samhollis.valhalla.folding.NullableFoldingBuilder"
+                             order="first"/>
+
+        <!-- Typed handler for typing assistance -->
+        <typedHandler implementation="me.samhollis.valhalla.typing.NullableTypedHandler"/>
+    </extensions>
+</idea-plugin>
