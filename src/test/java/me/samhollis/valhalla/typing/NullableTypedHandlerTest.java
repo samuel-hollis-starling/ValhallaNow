@@ -103,6 +103,24 @@ public class NullableTypedHandlerTest extends LightJavaCodeInsightFixtureTestCas
             import org.jspecify.annotations.Nullable;
             
             public class Test {
+                private String @Nullable [] names;
+            }
+            """);
+    }
+
+    public void testTypingQuestionMarkForNullableArrayElements() {
+        myFixture.configureByText("Test.java", """
+            public class Test {
+                private String<caret>[] names;
+            }
+            """);
+
+        myFixture.type('?');
+
+        myFixture.checkResult("""
+            import org.jspecify.annotations.Nullable;
+            
+            public class Test {
                 private @Nullable String[] names;
             }
             """);
