@@ -92,6 +92,11 @@ public class NullableFoldingBuilderTest extends LightJavaCodeInsightFixtureTestC
         myFixture.testFolding(getTestDataPath() + "/folding/ArrayOfNullableFolding.java");
     }
 
+    public void testFoldingForBothNullableArray() {
+
+        myFixture.testFolding(getTestDataPath() + "/folding/BothNullableArrayFolding.java");
+    }
+
     public void testFoldingForNestedGenerics() {
         myFixture.configureByText("Test.java", """
             import org.jspecify.annotations.Nullable;

@@ -1,23 +1,50 @@
 package me.samhollis.valhalla.typing;
 
+import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer;
 import com.intellij.codeInsight.editorActions.TypedHandlerDelegate;
+import com.intellij.codeInsight.folding.CodeFoldingManager;
 import com.intellij.codeInsight.hint.HintManager;
+import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.Editor;
+import com.intellij.openapi.editor.FoldRegion;
 import com.intellij.openapi.editor.FoldingModel;
+import com.intellij.openapi.fileEditor.FileEditor;
+import com.intellij.openapi.fileEditor.FileEditorManager;
+import com.intellij.openapi.fileEditor.TextEditor;
 import com.intellij.openapi.project.Project;
-import com.intellij.psi.*;
+import com.intellij.openapi.util.TextRange;
+import com.intellij.psi.JavaPsiFacade;
+import com.intellij.psi.PsiAnnotation;
+import com.intellij.psi.PsiArrayType;
+import com.intellij.psi.PsiDocumentManager;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiElementFactory;
+import com.intellij.psi.PsiFile;
+import com.intellij.psi.PsiImportList;
+import com.intellij.psi.PsiImportStatement;
+import com.intellij.psi.PsiJavaCodeReferenceElement;
+import com.intellij.psi.PsiJavaFile;
+import com.intellij.psi.PsiMethod;
+import com.intellij.psi.PsiModifierList;
+import com.intellij.psi.PsiModifierListOwner;
+import com.intellij.psi.PsiType;
+import com.intellij.psi.PsiTypeElement;
+import com.intellij.psi.PsiVariable;
 import com.intellij.psi.codeStyle.CodeStyleManager;
 import com.intellij.psi.util.PsiTreeUtil;
 import me.samhollis.valhalla.util.TypeValidator;
 import org.jetbrains.annotations.NotNull;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Typed handler that intercepts '?' character and converts it to @Nullable annotation.
  * Examples:
  * - String? → @Nullable String (with import)
  * - List<String?> → List<@Nullable String>
- * - String[]? → @Nullable String[]
- * - String?[] → String @Nullable []
+ * - String?[] → @Nullable String[] (array of nullable elements, folds to String?[])
+ * - String[]? → String @Nullable [] (nullable array, folds to String[]?)
  *
  * Rejects primitive types with error hint.
  */
@@ -44,24 +71,28 @@ public class NullableTypedHandler extends TypedHandlerDelegate {
             return Result.CONTINUE;
         }
 
+        // Check if we're right after ']' - this means String[]? (nullable array)
+        // In this case, we want to insert annotation between type and brackets
+        String textBeforeQuestion = editor.getDocument().getText(
+            new TextRange(Math.max(0, offset - 2), offset - 1)
+        );
+        boolean afterCloseBracket = "]".equals(textBeforeQuestion);
+
         // Find the type context
-        TypeContext context = findTypeContext(element);
+        TypeContext context = findTypeContext(element, afterCloseBracket);
         if (context == null) {
             return Result.CONTINUE;
         }
 
+        // Remove the typed '?'
+        editor.getDocument().deleteString(offset - 1, offset);
+
         // Validate not a primitive type
         if (TypeValidator.isPrimitiveType(context.type())) {
-            // Remove the typed '?'
-            editor.getDocument().deleteString(offset - 1, offset);
-
             // Show error hint
             HintManager.getInstance().showErrorHint(editor, PRIMITIVE_ERROR_MESSAGE);
             return Result.STOP;
         }
-
-        // Remove the typed '?'
-        editor.getDocument().deleteString(offset - 1, offset);
 
         // Commit the document to update PSI
         PsiDocumentManager.getInstance(project).commitDocument(editor.getDocument());
@@ -72,27 +103,32 @@ public class NullableTypedHandler extends TypedHandlerDelegate {
         return Result.STOP;
     }
 
-    private TypeContext findTypeContext(@NotNull PsiElement element) {
+    private TypeContext findTypeContext(@NotNull PsiElement element, boolean afterCloseBracket) {
         // Look for the nearest type element or reference
         PsiElement current = element;
 
         while (current != null) {
             // Check if we're in or right after a type reference element
-            if (current instanceof PsiJavaCodeReferenceElement) {
-                PsiJavaCodeReferenceElement ref = (PsiJavaCodeReferenceElement) current;
-                return analyzeTypeReference(ref);
+            if (current instanceof PsiJavaCodeReferenceElement ref) {
+                return analyzeTypeReference(ref, afterCloseBracket);
             }
 
             // Check if parent is a type reference
-            if (current.getParent() instanceof PsiJavaCodeReferenceElement) {
-                PsiJavaCodeReferenceElement ref = (PsiJavaCodeReferenceElement) current.getParent();
-                return analyzeTypeReference(ref);
+            if (current.getParent() instanceof PsiJavaCodeReferenceElement ref) {
+                return analyzeTypeReference(ref, afterCloseBracket);
             }
 
             // Check if we're in a type element
             PsiTypeElement typeElement = PsiTreeUtil.getParentOfType(current, PsiTypeElement.class, false);
             if (typeElement != null) {
-                return new TypeContext(typeElement, typeElement.getType(), AnnotationPosition.BEFORE_TYPE);
+                PsiType type = typeElement.getType();
+
+                // If we're after ] and it's an array type, we want ARRAY_COMPONENT position
+                if (afterCloseBracket && type instanceof PsiArrayType) {
+                    return new TypeContext(typeElement, type, AnnotationPosition.ARRAY_COMPONENT);
+                }
+
+                return new TypeContext(typeElement, type, AnnotationPosition.BEFORE_TYPE);
             }
 
             current = current.getParent();
@@ -101,7 +137,7 @@ public class NullableTypedHandler extends TypedHandlerDelegate {
         return null;
     }
 
-    private TypeContext analyzeTypeReference(@NotNull PsiJavaCodeReferenceElement ref) {
+    private TypeContext analyzeTypeReference(@NotNull PsiJavaCodeReferenceElement ref, boolean afterCloseBracket) {
         PsiElement parent = ref.getParent();
 
         // Check if we're in a type element
@@ -110,8 +146,11 @@ public class NullableTypedHandler extends TypedHandlerDelegate {
 
             // Check if this is an array type and determine position
             if (type instanceof PsiArrayType) {
-                // Determine if ? should mean array nullability or component nullability
-                // Default to array nullability (@Nullable String[])
+                // If ? typed after ], means String[]? → String @Nullable [] (nullable array)
+                if (afterCloseBracket) {
+                    return new TypeContext(typeElement, type, AnnotationPosition.ARRAY_COMPONENT);
+                }
+                // If ? typed after type name (before []), means String?[] → @Nullable String[] (nullable elements)
                 return new TypeContext(typeElement, type, AnnotationPosition.BEFORE_TYPE);
             }
 
@@ -124,46 +163,97 @@ public class NullableTypedHandler extends TypedHandlerDelegate {
     private void insertNullableAnnotation(@NotNull Project project, @NotNull TypeContext context, @NotNull PsiJavaFile file) {
         PsiElementFactory factory = JavaPsiFacade.getElementFactory(project);
 
-        // Create @Nullable annotation
-        PsiAnnotation annotation = factory.createAnnotationFromText(NULLABLE_ANNOTATION, context.target());
+        PsiAnnotation addedAnnotation = null;
 
-        // Find the modifier list to add annotation to
-        PsiModifierList modifierList = findModifierList(context.target());
+        // Handle ARRAY_COMPONENT position specially (String @Nullable [])
+        if (context.position() == AnnotationPosition.ARRAY_COMPONENT && context.target() instanceof PsiTypeElement typeElement) {
+            PsiType type = typeElement.getType();
 
-        if (modifierList != null) {
-            // Add annotation to modifier list
-            PsiAnnotation addedAnnotation = (PsiAnnotation) modifierList.addBefore(annotation, modifierList.getFirstChild());
+            if (type instanceof PsiArrayType arrayType) {
+                // Get the component type (for String[], this is String)
+                PsiType componentType = arrayType.getComponentType();
 
+                // Count array dimensions
+                int dimensions = 1;
+                PsiType innerType = componentType;
+                while (innerType instanceof PsiArrayType inner) {
+                    innerType = inner.getComponentType();
+                    dimensions++;
+                }
+
+                // Create new type text: "InnerType @Nullable [][]..."
+                // For String[], we want: String @Nullable []
+                // For String[][], we want: String[] @Nullable []
+                StringBuilder newTypeText = new StringBuilder();
+
+                if (componentType instanceof PsiArrayType) {
+                    // Multi-dimensional: component is already an array
+                    newTypeText.append(componentType.getCanonicalText());
+                } else {
+                    // Single dimension: component is not an array
+                    newTypeText.append(componentType.getCanonicalText());
+                }
+
+                newTypeText.append(" ").append(NULLABLE_ANNOTATION).append(" []");
+
+                PsiTypeElement newTypeElement = factory.createTypeElementFromText(newTypeText.toString(), typeElement);
+                PsiElement replaced = typeElement.replace(newTypeElement);
+
+                // Find the added annotation in the new type element
+                if (replaced instanceof PsiTypeElement replacedTypeElement) {
+                    addedAnnotation = PsiTreeUtil.findChildOfType(replacedTypeElement, PsiAnnotation.class);
+                }
+
+                // Format the code
+                CodeStyleManager.getInstance(project).reformat(replaced);
+            }
+        } else {
+            // Create @Nullable annotation
+            PsiAnnotation annotation = factory.createAnnotationFromText(NULLABLE_ANNOTATION, context.target());
+
+            // For type-use annotations like @Nullable, add them directly to the type element
+            // This ensures correct PSI structure and folding behavior
+            if (context.target() instanceof PsiTypeElement typeElement) {
+                addedAnnotation = (PsiAnnotation) typeElement.addBefore(annotation, typeElement.getFirstChild());
+
+                // Format the code
+                CodeStyleManager.getInstance(project).reformat(typeElement);
+            } else {
+                // Fallback: try to find modifier list for other cases
+                PsiModifierList modifierList = findModifierList(context.target());
+                if (modifierList != null) {
+                    addedAnnotation = (PsiAnnotation) modifierList.add(annotation);
+                    CodeStyleManager.getInstance(project).reformat(modifierList);
+                }
+            }
+        }
+
+        if (addedAnnotation != null) {
             // Add import for JSpecify Nullable
             addImport(file, project);
 
-            // Format the code
-            CodeStyleManager.getInstance(project).reformat(modifierList);
-
             // Commit all changes and wait for PSI synchronization
             PsiDocumentManager psiDocumentManager = PsiDocumentManager.getInstance(project);
-            psiDocumentManager.commitAllDocuments();
             psiDocumentManager.performWhenAllCommitted(() -> {
                 // Trigger folding update after PSI is fully committed
-                triggerFoldingUpdate(project, file, addedAnnotation);
+                triggerFoldingUpdate(project, file);
             });
+            psiDocumentManager.commitAllDocuments();
         }
     }
 
-    private void triggerFoldingUpdate(@NotNull Project project, @NotNull PsiJavaFile file, @NotNull PsiAnnotation annotation) {
+    private void triggerFoldingUpdate(@NotNull Project project, @NotNull PsiJavaFile file) {
         // Get all editors for this file
-        com.intellij.openapi.fileEditor.FileEditor[] fileEditors =
-            com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
-                .getEditors(file.getVirtualFile());
+        FileEditor[] fileEditors = FileEditorManager.getInstance(project).getEditors(file.getVirtualFile());
 
         if (fileEditors.length == 0) {
             return;
         }
 
         // Collect all text editors
-        java.util.List<Editor> editors = new java.util.ArrayList<>();
-        for (com.intellij.openapi.fileEditor.FileEditor fileEditor : fileEditors) {
-            if (fileEditor instanceof com.intellij.openapi.fileEditor.TextEditor textEditor) {
+        List<Editor> editors = new ArrayList<>();
+        for (FileEditor fileEditor : fileEditors) {
+            if (fileEditor instanceof TextEditor textEditor) {
                 editors.add(textEditor.getEditor());
             }
         }
@@ -172,60 +262,38 @@ public class NullableTypedHandler extends TypedHandlerDelegate {
             return;
         }
 
-        // Get the text range of the annotation to find matching fold regions
-        int annotationStart = annotation.getTextRange().getStartOffset();
+        CodeFoldingManager foldingManager = CodeFoldingManager.getInstance(project);
+        PsiDocumentManager psiDocumentManager = PsiDocumentManager.getInstance(project);
 
-        // Create a single Alarm that won't be garbage collected
-        com.intellij.util.Alarm alarm = new com.intellij.util.Alarm(project);
-
-        // Schedule folding update using invokeLater to ensure we're on EDT after PSI commit
-        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(() -> {
+        // Use invokeLater to update folding after PSI changes are processed
+        ApplicationManager.getApplication().invokeLater(() -> {
             if (project.isDisposed()) {
                 return;
             }
 
-            // Use DaemonCodeAnalyzer to trigger a reanalysis which will rebuild folding
-            com.intellij.codeInsight.daemon.DaemonCodeAnalyzer.getInstance(project).restart(file);
+            // Commit document to ensure PSI is up to date
+            psiDocumentManager.commitAllDocuments();
 
-            com.intellij.codeInsight.folding.CodeFoldingManager foldingManager =
-                com.intellij.codeInsight.folding.CodeFoldingManager.getInstance(project);
+            // Restart daemon to trigger folding rebuild
+            DaemonCodeAnalyzer.getInstance(project).restart(file);
 
             // Update fold regions for each editor
             for (Editor editor : editors) {
                 if (!editor.isDisposed()) {
                     foldingManager.updateFoldRegions(editor);
+
+                    // Collapse nullable fold regions
+                    FoldingModel foldingModel = editor.getFoldingModel();
+                    foldingModel.runBatchFoldingOperation(() -> {
+                        for (FoldRegion region : foldingModel.getAllFoldRegions()) {
+                            String placeholder = region.getPlaceholderText();
+                            if (placeholder != null && placeholder.endsWith("?") && region.isExpanded()) {
+                                region.setExpanded(false);
+                            }
+                        }
+                    });
                 }
             }
-
-            // Schedule a delayed update to collapse the fold regions after they're created
-            alarm.addRequest(() -> {
-                if (project.isDisposed()) {
-                    return;
-                }
-
-                for (Editor editor : editors) {
-                    if (!editor.isDisposed()) {
-                        // First update to ensure fold regions exist
-                        foldingManager.updateFoldRegions(editor);
-
-                        // Now find and collapse fold regions that contain @Nullable
-                        FoldingModel foldingModel = editor.getFoldingModel();
-                        foldingModel.runBatchFoldingOperation(() -> {
-                            for (com.intellij.openapi.editor.FoldRegion region : foldingModel.getAllFoldRegions()) {
-                                // Check if this fold region starts at or near our annotation
-                                // and contains a '?' in its placeholder (our Nullable folding)
-                                String placeholder = region.getPlaceholderText();
-                                if (placeholder != null && placeholder.endsWith("?")) {
-                                    // This is one of our Nullable fold regions - collapse it
-                                    if (region.isExpanded()) {
-                                        region.setExpanded(false);
-                                    }
-                                }
-                            }
-                        });
-                    }
-                }
-            }, 150);
         });
     }
 
