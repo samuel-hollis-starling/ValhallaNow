@@ -31,4 +31,7 @@ public class TestFoldingIssues {
 
     // Both array and component nullable: @Nullable String @Nullable[] → String?[]?
     private @Nullable String @Nullable[] bothNullable;
+
+    // Should not do any parsing
+    private List<? extends Object> extendyThing;
 }

@@ -5,6 +5,7 @@ import com.intellij.codeInsight.editorActions.TypedHandlerDelegate;
 import com.intellij.codeInsight.folding.CodeFoldingManager;
 import com.intellij.codeInsight.hint.HintManager;
 import com.intellij.openapi.application.ApplicationManager;
+import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.editor.Editor;
 import com.intellij.openapi.editor.FoldRegion;
 import com.intellij.openapi.editor.FoldingModel;
@@ -62,6 +63,13 @@ public class NullableTypedHandler extends TypedHandlerDelegate {
         }
 
         int offset = editor.getCaretModel().getOffset();
+
+        // Check if this '?' is a wildcard type argument (e.g., List<?>, List<? extends Object>).
+        // Scan backward past whitespace: if the first non-whitespace char before '?' is '<' or ','
+        // we are in a wildcard position, not a nullable marker position.
+        if (isWildcardContext(editor.getDocument(), offset - 1)) {
+            return Result.CONTINUE;
+        }
 
         // The '?' was just typed, so offset points right after it
         // We need to look at the element before the '?', which is at offset - 2
@@ -340,6 +348,23 @@ public class NullableTypedHandler extends TypedHandlerDelegate {
             importList.add(importStatement);
             CodeStyleManager.getInstance(project).reformat(importList);
         }
+    }
+
+    /**
+     * Returns true if the '?' at questionMarkOffset is a wildcard type argument rather than a
+     * nullable marker. Scans backward past whitespace; if the first non-whitespace character is
+     * '<' or ',' the '?' opens a wildcard (e.g. List<?>, List<? extends Foo>, Map<K,?>).
+     */
+    private boolean isWildcardContext(@NotNull Document document, int questionMarkOffset) {
+        int pos = questionMarkOffset - 1;
+        while (pos >= 0) {
+            char ch = document.getCharsSequence().charAt(pos);
+            if (!Character.isWhitespace(ch)) {
+                return ch == '<' || ch == ',';
+            }
+            pos--;
+        }
+        return false;
     }
 
     private enum AnnotationPosition {
